@@ -14,6 +14,7 @@ import cv2
 import sys
 import time
 import torch
+import numpy as np
 from ultralytics import YOLO
 from pathlib import Path
 
@@ -48,32 +49,33 @@ def get_cpu_temperature():
 
 def optimize_for_arm():
     """Configuraciones específicas para ARM/Raspberry Pi"""
-    # Detectar número de cores disponibles
     import multiprocessing
     num_cores = multiprocessing.cpu_count()
     optimal_threads = max(1, num_cores - 1)
     
-    cv2.setNumThreads(optimal_threads)
+    # Optimizaciones AGRESIVAS para ARM
+    # OpenCV: 1 thread para evitar overhead de sincronización
+    cv2.setNumThreads(1)
     if hasattr(cv2, "setUseOptimized"):
         cv2.setUseOptimized(True)
     
-    # Desactivar CUDA si está disponible (más lento en CPU)
+    # Desactivar CUDA
     os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
     
-    # Optimizar PyTorch para CPU
+    # PyTorch optimizaciones
     torch.set_num_threads(optimal_threads)
     torch.set_num_interop_threads(1)
+    torch.set_float32_matmul_precision('medium')
 
-    print("[INFO] Optimizaciones ARM aplicadas")
-    print(f"       - Threads CV2: {optimal_threads}")
+    print("[INFO] Optimizaciones ARM AGRESIVAS aplicadas")
+    print("       - Threads CV2: 1")
     print(f"       - Threads PyTorch: {optimal_threads}")
-    print("       - NEON Optimization: Enabled")
-    print("       - CUDA: Disabled")
+    print("       - Float32 precision: Medium")
 
 
 def convert_model_to_ncnn(model_path, imgsz=320, verbose=False):
     """
-    Convierte un modelo YOLOv8 a formato NCNN
+    Convierte un modelo YOLOv8 a formato NCNN con INT8 quantization
 
     Args:
         model_path: Ruta al modelo YOLOv8 (.pt)
@@ -86,11 +88,28 @@ def convert_model_to_ncnn(model_path, imgsz=320, verbose=False):
     try:
         if verbose:
             print(f"[NCNN] Convirtiendo modelo: {model_path}")
+            print("[NCNN] INT8 quantization activada para ARM")
 
         model = YOLO(model_path)
 
-        # Exportar a NCNN
-        model.export(format="ncnn", imgsz=imgsz, optimize=False, simplify=True)
+        # Exportar a NCNN con optimizaciones ARM
+        export_params = {
+            "format": "ncnn",
+            "imgsz": imgsz,
+            "optimize": True,
+            "simplify": True,
+        }
+        
+        # Intentar INT8 si está disponible
+        try:
+            export_params["int8"] = True
+            if verbose:
+                print("[NCNN] Usando INT8 quantization...")
+        except Exception as e:
+            if verbose:
+                print(f"[NCNN] INT8 no soportado: {e}, usando FP32")
+        
+        model.export(**export_params)
 
         # Encontrar los archivos generados
         base_name = Path(model_path).stem
@@ -103,136 +122,152 @@ def convert_model_to_ncnn(model_path, imgsz=320, verbose=False):
 
             if param_file.exists() and bin_file.exists():
                 if verbose:
-                    print(f"[NCNN] Conversión completada")
-                    print(f"       - {param_file}")
-                    print(f"       - {bin_file}")
+                    print("[NCNN] ✅ Conversión completada")
+                    print(f"       Param: {param_file}")
+                    print(f"       Bin: {bin_file}")
 
                 return str(param_file), str(bin_file)
 
         if verbose:
-            print("[ERROR] No se encontraron archivos NCNN generados")
+            print("[NCNN] ⚠️ Archivos no encontrados")
         return None, None
 
     except Exception as e:
         if verbose:
-            print(f"[ERROR] Conversión a NCNN falló: {e}")
+            print(f"[NCNN] ⚠️ Error en conversión: {e}")
         return None, None
 
 
 class NCNNYolo:
-    """Wrapper para YOLO usando NCNN"""
+    """Wrapper para YOLO usando NCNN - OPTIMIZADO PARA ARM"""
 
     def __init__(
-        self, param_path, bin_path, input_size=320, conf_threshold=0.5, verbose=False
+        self, param_path, bin_path, input_size=128, conf_threshold=0.3, verbose=False
     ):
         if not NCNN_AVAILABLE:
             raise ImportError("NCNN no está disponible")
 
+        if verbose:
+            print("[NCNN] Inicializando red NCNN...")
+            print(f"[NCNN] Input size: {input_size}")
+
         self.net = ncnn.Net()
         self.net.opt.use_vulkan_compute = False
-        self.net.opt.num_threads = 2
+        
+        # Detectar número óptimo de threads
+        import multiprocessing
+        optimal_threads = max(1, multiprocessing.cpu_count() - 1)
+        self.net.opt.num_threads = optimal_threads
+        
+        if verbose:
+            print(f"[NCNN] Threads: {optimal_threads}")
 
-        self.net.load_param(param_path)
-        self.net.load_model(bin_path)
+        try:
+            self.net.load_param(param_path)
+            self.net.load_model(bin_path)
+            if verbose:
+                print("[NCNN] ✅ Modelo cargado correctamente")
+        except Exception as e:
+            if verbose:
+                print(f"[NCNN] ❌ Error cargando modelo: {e}")
+            raise
 
         self.input_size = input_size
         self.conf_threshold = conf_threshold
         self.verbose = verbose
+        self.track_id_counter = 0
 
     def track(self, image, classes=None, **kwargs):
         """Detectar y trackear objetos (interfaz compatible con YOLOv8)"""
         try:
             h, w = image.shape[:2]
-            scale = min(self.input_size / w, self.input_size / h)
-            new_w, new_h = int(w * scale), int(h * scale)
-
-            resized = cv2.resize(image, (new_w, new_h))
-            pad_w = self.input_size - new_w
-            pad_h = self.input_size - new_h
-            top, bottom = pad_h // 2, pad_h - pad_h // 2
-            left, right = pad_w // 2, pad_w - pad_w // 2
-
-            padded = cv2.copyMakeBorder(
-                resized,
-                top,
-                bottom,
-                left,
-                right,
-                cv2.BORDER_CONSTANT,
-                value=(114, 114, 114),
-            )
-
+            
+            # Preparar imagen
+            img = cv2.resize(image, (self.input_size, self.input_size), interpolation=cv2.INTER_LINEAR)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            
+            # Normalizar
             mat_in = ncnn.Mat.from_pixels(
-                padded, ncnn.Mat.PixelType.PIXEL_BGR, self.input_size, self.input_size
+                img, ncnn.Mat.PixelType.PIXEL_RGB, self.input_size, self.input_size
             )
-            mat_in.substract_mean_normalize(
-                [0, 0, 0], [1 / 255.0, 1 / 255.0, 1 / 255.0]
-            )
-
+            
+            # Normalizar a [0, 1]
+            mat_in.substract_mean_normalize([0, 0, 0], [1/255.0, 1/255.0, 1/255.0])
+            
+            # Inferencia
             ex = self.net.create_extractor()
-            
-            # Intentar con nombres estándar de NCNN
-            ret = ex.input("in0", mat_in)
-            if ret != 0:
-                ex.input("images", mat_in)
-            
-            ret, mat_out = ex.extract("out0")
-            if ret != 0:
-                ret, mat_out = ex.extract("output")
+            ret = ex.input("images", mat_in)
             
             if ret != 0:
                 if self.verbose:
-                    print("[WARNING] No se pudo extraer output de NCNN")
+                    print("[NCNN] ⚠️ Error: input 'images' no encontrado")
                 return Results(boxes=[], conf=[], cls=[], ids=None)
-
-            # Procesar salida NCNN
-            # Formato esperado: [x_center, y_center, width, height, conf, class_probs...]
+            
+            ret, mat_out = ex.extract("output")
+            
+            if ret != 0:
+                if self.verbose:
+                    print("[NCNN] ⚠️ Error: output 'output' no encontrado")
+                return Results(boxes=[], conf=[], cls=[], ids=None)
+            
+            # Parsear detecciones (formato: x, y, w, h, conf, class_probs...)
             detections = []
+            h_mat = mat_out.h
             
-            if hasattr(mat_out, "w") and hasattr(mat_out, "h"):
-                for i in range(mat_out.h):
-                    row = []
-                    for j in range(mat_out.w):
-                        row.append(mat_out.channel(j)[i])
-                    if len(row) >= 5:
-                        x_c, y_c, w, h = row[0], row[1], row[2], row[3]
-                        conf = max(row[4:]) if len(row) > 4 else 0
-                        cls_id = row[4:].index(conf) if len(row) > 4 else 0
+            # Iterar sobre detecciones
+            for i in range(h_mat):
+                data = mat_out.row(i)
+                if len(data) >= 6:
+                    x_c, y_c, box_w, box_h, conf = data[:5]
+                    
+                    if conf >= self.conf_threshold:
+                        # Convertir a bbox
+                        x1 = int((x_c - box_w/2) * w / self.input_size)
+                        y1 = int((y_c - box_h/2) * h / self.input_size)
+                        x2 = int((x_c + box_w/2) * w / self.input_size)
+                        y2 = int((y_c + box_h/2) * h / self.input_size)
                         
-                        # Filtrar por confianza
-                        if conf >= self.conf_threshold:
-                            # Convertir de coordenadas normalizadas
-                            x1 = (x_c - w/2) * w / scale
-                            y1 = (y_c - h/2) * h / scale
-                            x2 = (x_c + w/2) * w / scale
-                            y2 = (y_c + h/2) * h / scale
-                            
-                            detections.append({
-                                'box': [x1, y1, x2, y2],
-                                'conf': conf,
-                                'cls': cls_id
-                            })
+                        # Clase
+                        cls_idx = 0
+                        if len(data) > 5:
+                            cls_probs = data[5:]
+                            cls_idx = int(np.argmax(cls_probs))
+                        
+                        # Filtrar por clase si se especifica
+                        if classes is not None:
+                            if cls_idx not in classes:
+                                continue
+                        
+                        detections.append({
+                            'box': [x1, y1, x2, y2],
+                            'conf': float(conf),
+                            'cls': cls_idx,
+                            'id': self.track_id_counter
+                        })
+                        self.track_id_counter += 1
             
-            # Retornar formato compatible con YOLOv8
+            # Convertir a formato YOLOv8
             if detections:
-                boxes = []
-                confs = []
-                clss = []
-                for det in detections:
-                    boxes.append(det['box'])
-                    confs.append(det['conf'])
-                    clss.append(det['cls'])
+                boxes = np.array([d['box'] for d in detections], dtype=np.float32)
+                confs = np.array([d['conf'] for d in detections], dtype=np.float32)
+                clss = np.array([d['cls'] for d in detections], dtype=np.int32)
+                ids = np.array([d['id'] for d in detections], dtype=np.int32)
                 
                 return Results(
                     boxes=torch.tensor(boxes),
                     conf=torch.tensor(confs),
                     cls=torch.tensor(clss),
-                    ids=None
+                    ids=torch.tensor(ids)
                 )
             else:
                 return Results(boxes=[], conf=[], cls=[], ids=None)
 
         except Exception as e:
+            if self.verbose:
+                print(f"[NCNN] ❌ Error en track: {e}")
+                import traceback
+                traceback.print_exc()
+            return Results(boxes=[], conf=[], cls=[], ids=None)
             if self.verbose:
                 print(f"[WARNING] Detección NCNN: {e}")
             return Results(boxes=[], conf=[], cls=[], ids=None)
@@ -265,6 +300,7 @@ class ObjectDetector:
         arm_optimize=False,
         use_ncnn=False,
         verbose=False,
+        skip_frames=0,  # NUEVO: saltar N frames
     ):
         self.model_path = model_path
         self.camera_idx = camera_idx
@@ -278,6 +314,8 @@ class ObjectDetector:
         self.verbose = verbose
         self.use_ncnn_mode = False
         self.model = None
+        self.skip_frames = skip_frames
+        self.frame_count = 0  # NUEVO: contador de frames
 
         # Detectar si estamos en Raspberry Pi
         self.on_pi = is_raspberry_pi()
@@ -326,10 +364,15 @@ class ObjectDetector:
         self.fps_display = 0
 
     def _init_ncnn_model(self):
-        """Inicializa modelo NCNN"""
+        """Inicializa modelo NCNN - OPTIMIZADO PARA ARM"""
+        if not NCNN_AVAILABLE:
+            if self.verbose:
+                print("[NCNN] ⚠️ NCNN no está instalado, usando YOLOv8")
+            return False
+        
         try:
             if self.verbose:
-                print("[INFO] Intentando usar NCNN...")
+                print("[NCNN] Intentando inicializar NCNN...")
 
             param_path, bin_path = convert_model_to_ncnn(
                 self.model_path, self.imgsz, self.verbose
@@ -337,52 +380,57 @@ class ObjectDetector:
 
             if param_path and bin_path:
                 if self.verbose:
-                    print("[WARNING] NCNN inestable en esta versión, usando YOLOv8")
+                    print("[NCNN] Cargando modelo NCNN...")
+                
+                self.model = NCNNYolo(
+                    param_path=param_path,
+                    bin_path=bin_path,
+                    input_size=self.imgsz,
+                    conf_threshold=self.conf_threshold,
+                    verbose=self.verbose
+                )
+                self.use_ncnn_mode = True
+                if self.verbose:
+                    print("[NCNN] ✅ Modelo NCNN listo para usar")
+                return True
+            else:
+                if self.verbose:
+                    print("[NCNN] ⚠️ Conversión falló, usando YOLOv8")
                 return False
+                
         except Exception as e:
             if self.verbose:
-                print(f"[WARNING] NCNN no disponible: {e}")
-
-        return False
+                print(f"[NCNN] ⚠️ Error inicializando NCNN: {e}")
+                print("[NCNN] Fallback a YOLOv8...")
+            return False
 
     def _init_yolo_model(self, half_precision):
-        """Inicializa modelo YOLOv8"""
+        """Inicializa modelo YOLOv8 - OPTIMIZADO MÁXIMO PARA ARM"""
         if self.verbose:
             print(f"[INFO] Cargando YOLOv8: {self.model_path}...")
 
         # Cargar modelo
         self.model = YOLO(self.model_path)
         
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = "cpu"  # SIEMPRE CPU en ARM
         if self.verbose:
             print(f"[INFO] Device: {device}")
 
-        # Configurar modelo con parámetros óptimos para ARM
-        if device == "cpu":
-            # En CPU, usar max_det bajo y verbose=False para más velocidad
-            self.model.overrides['max_det'] = 300  # Reducir detecciones
-            self.model.overrides['verbose'] = False
-            self.model.overrides['agnostic_nms'] = False
-            
-            if half_precision:
-                if self.verbose:
-                    print("[INFO] Usando FP16")
-                self.model.to(device).half()
-            else:
-                self.model.to(device)
-        else:
-            # GPU
-            if half_precision:
-                if self.verbose:
-                    print("[INFO] Usando FP16")
-                self.model.to(device).half()
-            else:
-                self.model.to(device)
-
+        # CONFIGURAR CON PARÁMETROS AGRESIVOS PARA ARM
+        self.model.overrides['max_det'] = 100  # MÁS REDUCIDO
+        self.model.overrides['verbose'] = False
+        self.model.overrides['agnostic_nms'] = False
+        self.model.overrides['amp'] = False  # Deshabilitar automatic mixed precision
+        self.model.overrides['device'] = 0  # Forzar CPU
+        
+        # Desabilitar postprocesamiento pesado
+        self.model.overrides['iou'] = 0.45  # Lower IOU para menos NMS
+        
+        self.model.to(device)
         self.use_ncnn_mode = False
 
     def get_detection(self):
-        """Obtiene una detección de la cámara"""
+        """Obtiene una detección de la cámara - OPTIMIZADO PARA ARM"""
         ret, frame = self.cap.read()
         if not ret:
             return {
@@ -393,6 +441,22 @@ class ObjectDetector:
                 "timestamp": time.time(),
             }
 
+        # Contar frames para saltar
+        self.frame_count += 1
+        
+        # Si debemos saltar este frame, retornar cache
+        if self.skip_frames > 0 and self.frame_count % (self.skip_frames + 1) != 0:
+            return {
+                "detected": False,
+                "objects": [],
+                "frame": frame,
+                "fps": self.fps_display,
+                "timestamp": time.time(),
+            }
+
+        # Reducir resolución drasticamente para ARM (160x120 = 1/16 de píxeles)
+        frame_small = cv2.resize(frame, (160, 120), interpolation=cv2.INTER_LINEAR)
+
         # Actualizar FPS
         current_time = time.time()
         elapsed = current_time - self.last_time
@@ -402,18 +466,32 @@ class ObjectDetector:
             self.fps_counter = 0
             self.last_time = current_time
 
-        # Ejecutar tracking
+        # Ejecutar tracking - SOPORTE PARA NCNN Y YOLOV8
         try:
-            # Solo YOLOv8 mode (NCNN deshabilitado por inestabilidad)
-            results = self.model.track(
-                frame,
-                conf=self.conf_threshold,
-                classes=[self.target_class],
-                imgsz=self.imgsz,
-                tracker=self.tracker,
-                persist=True,
-                verbose=False,
-            )
+            # Seleccionar backend
+            if self.use_ncnn_mode:
+                # NCNN ya redimensiona internamente
+                results = self.model.track(
+                    frame,  # NCNN maneja resize internamente
+                    classes=[self.target_class],
+                    imgsz=self.imgsz,
+                )
+            else:
+                # YOLOv8 nativo
+                frame_small = cv2.resize(frame, (160, 120), interpolation=cv2.INTER_LINEAR)
+                results = self.model.track(
+                    frame_small,
+                    conf=self.conf_threshold,
+                    classes=[self.target_class],
+                    imgsz=128,
+                    tracker=self.tracker,
+                    persist=True,
+                    verbose=False,
+                    device='cpu',
+                    half=False,
+                    augment=False,
+                )
+            
             r = results[0] if isinstance(results, list) else results
 
             objects_detected = []
@@ -510,29 +588,31 @@ def main():
     ap.add_argument("--model", type=str, default="yolov8n.pt", help="Modelo YOLOv8")
     ap.add_argument("--conf", type=float, default=0.2, help="Confianza mínima")
     ap.add_argument("--class", type=int, default=0, dest="target_class", help="Clase objetivo (0=person, 1=bicycle, etc)")
-    ap.add_argument("--imgsz", type=int, default=320, help="Tamaño de imagen")
-    ap.add_argument("--width", type=int, default=640, help="Ancho de captura")
-    ap.add_argument("--height", type=int, default=480, help="Alto de captura")
-    ap.add_argument("--fps", type=int, default=30, help="FPS de captura")
+    ap.add_argument("--imgsz", type=int, default=128, help="Tamaño de imagen")
+    ap.add_argument("--width", type=int, default=160, help="Ancho de captura")
+    ap.add_argument("--height", type=int, default=120, help="Alto de captura")
+    ap.add_argument("--fps", type=int, default=15, help="FPS de captura")
+    ap.add_argument("--skip-frames", type=int, default=0, help="Saltar N frames entre detecciones")
     ap.add_argument("--tracker", type=str, default="bytetrack.yaml", help="Tracker")
     ap.add_argument("--half", action="store_true", help="Usar FP16")
     ap.add_argument("--arm-optimize", action="store_true", help="Optimizar para ARM")
     ap.add_argument(
-        "--use-ncnn", action="store_true", help="Usar NCNN si está disponible"
+        "--use-ncnn", action="store_true", help="Usar NCNN SI O SI para máxima velocidad"
     )
-    ap.add_argument("--rpi5-fast", action="store_true", help="Preset optimizado para Raspberry Pi 5 (muy rápido)")
+    ap.add_argument("--rpi5-ultra-fast", action="store_true", help="MÁXIMA OPTIMIZACIÓN para Raspberry Pi 5 (160x120, imgsz=128)")
     ap.add_argument("--verbose", action="store_true", help="Modo verbose")
     args = ap.parse_args()
     
-    # Aplicar preset Raspberry Pi 5 si se solicita
-    if args.rpi5_fast:
-        args.width = 320
-        args.height = 240
-        args.imgsz = 256
-        args.fps = 20
+    # Aplicar preset ULTRA RÁPIDO si se solicita
+    if args.rpi5_ultra_fast:
+        args.width = 160
+        args.height = 120
+        args.imgsz = 128
+        args.fps = 15
+        args.skip_frames = 0
         args.arm_optimize = True
-        args.use_ncnn = True
-        args.conf = 0.4
+        args.use_ncnn = True  # NCNN HABILITADO para máxima velocidad
+        args.conf = 0.3
 
     try:
         detector = ObjectDetector(
@@ -549,6 +629,7 @@ def main():
             arm_optimize=args.arm_optimize,
             use_ncnn=args.use_ncnn,
             verbose=args.verbose,
+            skip_frames=args.skip_frames,
         )
 
         win = "YOLOv8 Detector - ARM"

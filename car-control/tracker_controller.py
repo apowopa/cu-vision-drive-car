@@ -207,7 +207,12 @@ class TrackerController:
                  use_ncnn=False,
                  arm_optimize=False,
                  simulation=False,
-                 verbose=False):
+                 verbose=False,
+                 skip_frames=0,
+                 width=160,
+                 height=120,
+                 imgsz=128,
+                 fps=15):
         """
         Inicializa el controlador de seguimiento
         
@@ -220,6 +225,11 @@ class TrackerController:
             arm_optimize: Aplicar optimizaciones ARM
             simulation: Modo simulación (sin hardware)
             verbose: Mostrar mensajes de debug
+            skip_frames: Saltear N frames entre detecciones
+            width: Ancho de captura (default optimizado para ARM)
+            height: Alto de captura (default optimizado para ARM)
+            imgsz: Tamaño de imagen YOLO (default optimizado)
+            fps: FPS de captura (default optimizado)
         """
         self.verbose = verbose
         
@@ -232,14 +242,15 @@ class TrackerController:
             camera_idx=camera_idx,
             conf_threshold=conf_threshold,
             target_class=target_class,
-            imgsz=320,
-            width=640,
-            height=480,
-            fps=30,
+            imgsz=imgsz,
+            width=width,
+            height=height,
+            fps=fps,
             tracker="bytetrack.yaml",
             arm_optimize=arm_optimize,
             use_ncnn=use_ncnn,
-            verbose=verbose
+            verbose=verbose,
+            skip_frames=skip_frames,
         )
         
         # Inicializar controlador de motores
@@ -370,6 +381,18 @@ def main():
     parser.add_argument("--conf", type=float, default=0.5,
                         help="Umbral de confianza (default: 0.5)")
     
+    # Parámetros de captura (optimizados para ARM)
+    parser.add_argument("--width", type=int, default=160,
+                        help="Ancho de captura (default: 160 optimizado para ARM)")
+    parser.add_argument("--height", type=int, default=120,
+                        help="Alto de captura (default: 120 optimizado para ARM)")
+    parser.add_argument("--imgsz", type=int, default=128,
+                        help="Tamaño de imagen YOLO (default: 128 optimizado)")
+    parser.add_argument("--fps", type=int, default=15,
+                        help="FPS de captura (default: 15 optimizado)")
+    parser.add_argument("--skip-frames", type=int, default=0,
+                        help="Saltear N frames entre detecciones (default: 0)")
+    
     # Opciones de optimización
     parser.add_argument("--use-ncnn", action="store_true",
                         help="Usar NCNN si está disponible")
@@ -397,7 +420,12 @@ def main():
         use_ncnn=args.use_ncnn,
         arm_optimize=args.arm_optimize,
         simulation=args.simulation,
-        verbose=args.verbose
+        verbose=args.verbose,
+        skip_frames=args.skip_frames,
+        width=args.width,
+        height=args.height,
+        imgsz=args.imgsz,
+        fps=args.fps,
     )
     
     # Ejecutar
