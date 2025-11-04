@@ -14,20 +14,21 @@ import torch
 import numpy as np
 from ultralytics import YOLO
 from pathlib import Path
-
 # Desabilitar GUI COMPLETAMENTE antes de cualquier import de cv2
-os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+os.environ['QT_QPA_PLATFORM'] = 'xcb'  # Usar xcb en lugar de offscreen (que no existe)
+os.environ['DISPLAY'] = ':99'  # Virtual display para xcb
 os.environ['QT_QPA_FONTDIR'] = '/usr/share/fonts'
 os.environ['SDL_VIDEODRIVER'] = 'dummy'
-os.environ['DISPLAY'] = ''
 os.environ['MPLBACKEND'] = 'Agg'
 os.environ["QT_DEBUG_PLUGINS"] = "0"  # Desabilitar debug de Qt
 os.environ["QT_XCB_GL_INTEGRATION"] = "none"  # Desabilitar GL integration
+os.environ["QT_XCB_SCREEN_LIST"] = ""  # Sin screens
+os.environ["QT_QPA_PLATFORMTHEME"] = "minimal"  # Tema minimal
 
 # Suppress Qt warnings antes de importar cv2
 warnings.filterwarnings("ignore")
 
-# Importar cv2 - requiere manejo especial de Qt en headless
+# Importar cv2 
 import cv2
 
 # Asegurar que cv2 use el backend correcto
@@ -97,6 +98,7 @@ def optimize_for_arm():
 def convert_model_to_ncnn(model_path, imgsz=320, verbose=False):
     """
     Convierte un modelo YOLOv8 a formato NCNN con FP32 precision
+    Usa múltiples estrategias para manejar incompatibilidades
 
     Args:
         model_path: Ruta al modelo YOLOv8 (.pt)
@@ -113,20 +115,41 @@ def convert_model_to_ncnn(model_path, imgsz=320, verbose=False):
 
         model = YOLO(model_path)
 
-        # Exportar a NCNN con optimizaciones ARM - FP32 solo
-        export_params = {
-            "format": "ncnn",
-            "imgsz": imgsz,
-            "optimize": True,
-            "simplify": True,
-        }
-        
-        # INT8 no está soportado en ultralytics para NCNN format
-        # Se usa FP32 por defecto
+        # Estrategia 1: Exportar con optimize=False y simplify=False
         if verbose:
-            print("[NCNN] Usando FP32 precision...")
-        
-        model.export(**export_params)
+            print("[NCNN] Intento 1: optimize=False, simplify=False...")
+        try:
+            model.export(
+                format="ncnn",
+                imgsz=imgsz,
+                optimize=False,
+                simplify=False,
+            )
+        except Exception as e1:
+            if verbose:
+                print(f"[NCNN] Intento 1 falló: {e1}")
+            
+            # Estrategia 2: Exportar con simplify=True solamente
+            if verbose:
+                print("[NCNN] Intento 2: optimize=False, simplify=True...")
+            try:
+                model.export(
+                    format="ncnn",
+                    imgsz=imgsz,
+                    optimize=False,
+                    simplify=True,
+                )
+            except Exception as e2:
+                if verbose:
+                    print(f"[NCNN] Intento 2 falló: {e2}")
+                
+                # Estrategia 3: Exportar sin parámetros opcionales
+                if verbose:
+                    print("[NCNN] Intento 3: parámetros mínimos...")
+                model.export(
+                    format="ncnn",
+                    imgsz=imgsz,
+                )
 
         # Encontrar los archivos generados
         base_name = Path(model_path).stem
