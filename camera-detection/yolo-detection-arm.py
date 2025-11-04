@@ -7,6 +7,13 @@ Soporta tanto YOLOv8 nativo como conversión automática a NCNN
 
 import os
 import sys
+import argparse
+import time
+import warnings
+import torch
+import numpy as np
+from ultralytics import YOLO
+from pathlib import Path
 
 # Desabilitar GUI COMPLETAMENTE antes de cualquier import de cv2
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
@@ -14,14 +21,23 @@ os.environ['QT_QPA_FONTDIR'] = '/usr/share/fonts'
 os.environ['SDL_VIDEODRIVER'] = 'dummy'
 os.environ['DISPLAY'] = ''
 os.environ['MPLBACKEND'] = 'Agg'
+os.environ["QT_DEBUG_PLUGINS"] = "0"  # Desabilitar debug de Qt
+os.environ["QT_XCB_GL_INTEGRATION"] = "none"  # Desabilitar GL integration
 
-import argparse
+# Suppress Qt warnings antes de importar cv2
+warnings.filterwarnings("ignore")
+
+# Importar cv2 - requiere manejo especial de Qt en headless
 import cv2
-import time
-import torch
-import numpy as np
-from ultralytics import YOLO
-from pathlib import Path
+
+# Asegurar que cv2 use el backend correcto
+try:
+    cv2.setNumThreads(1)
+    cv2.setUseOptimized(True)
+except Exception:
+    pass
+
+CV2_AVAILABLE = True
 
 # ARM/Raspberry Pi specific imports
 try:
@@ -80,7 +96,7 @@ def optimize_for_arm():
 
 def convert_model_to_ncnn(model_path, imgsz=320, verbose=False):
     """
-    Convierte un modelo YOLOv8 a formato NCNN con INT8 quantization
+    Convierte un modelo YOLOv8 a formato NCNN con FP32 precision
 
     Args:
         model_path: Ruta al modelo YOLOv8 (.pt)
@@ -93,11 +109,11 @@ def convert_model_to_ncnn(model_path, imgsz=320, verbose=False):
     try:
         if verbose:
             print(f"[NCNN] Convirtiendo modelo: {model_path}")
-            print("[NCNN] INT8 quantization activada para ARM")
+            print("[NCNN] FP32 precision (INT8 no soportado en ultralytics)")
 
         model = YOLO(model_path)
 
-        # Exportar a NCNN con optimizaciones ARM
+        # Exportar a NCNN con optimizaciones ARM - FP32 solo
         export_params = {
             "format": "ncnn",
             "imgsz": imgsz,
@@ -105,14 +121,10 @@ def convert_model_to_ncnn(model_path, imgsz=320, verbose=False):
             "simplify": True,
         }
         
-        # Intentar INT8 si está disponible
-        try:
-            export_params["int8"] = True
-            if verbose:
-                print("[NCNN] Usando INT8 quantization...")
-        except Exception as e:
-            if verbose:
-                print(f"[NCNN] INT8 no soportado: {e}, usando FP32")
+        # INT8 no está soportado en ultralytics para NCNN format
+        # Se usa FP32 por defecto
+        if verbose:
+            print("[NCNN] Usando FP32 precision...")
         
         model.export(**export_params)
 
@@ -641,11 +653,18 @@ def main():
         win = "YOLOv8 Detector - ARM"
         has_display = False
         try:
-            cv2.namedWindow(win)
+            # Intentar crear ventana de OpenCV
+            # Esto puede fallar en headless si Qt no está disponible
+            cv2.namedWindow(win, cv2.WINDOW_NORMAL)
             has_display = True
-        except Exception as e:
             if detector.verbose:
-                print(f"[INFO] No display available (headless mode): {e}")
+                print("[INFO] Display available - visualization ENABLED")
+        except Exception as e:
+            # En headless o sin display, esto falla silenciosamente
+            has_display = False
+            if detector.verbose:
+                print(f"[INFO] No display available (headless mode): {type(e).__name__}: {e}")
+                print("[INFO] Running detection WITHOUT visualization")
 
         while True:
             result = detector.get_detection()
