@@ -407,9 +407,55 @@ class ObjectDetector:
         try:
             if self.use_ncnn_mode:
                 # NCNN mode
-                detections = self.model.detect(frame)
+                results = self.model.track(
+                    frame,
+                    classes=[self.target_class],
+                    imgsz=self.imgsz,
+                )
+                r = results if isinstance(results, object) else results
                 objects_detected = []
-                detected = len(detections) > 0
+                detected = False
+                
+                if hasattr(r, 'boxes') and r.boxes is not None and len(r.boxes) > 0:
+                    detected = True
+                    
+                    boxes = r.boxes
+                    if hasattr(boxes, "cpu"):
+                        boxes = boxes.cpu().numpy()
+                    boxes = boxes.astype(int) if hasattr(boxes, 'astype') else boxes
+
+                    confs = r.conf
+                    if hasattr(confs, "cpu"):
+                        confs = confs.cpu().numpy()
+
+                    for i, box in enumerate(boxes):
+                        try:
+                            x1, y1, x2, y2 = box[:4]
+                            conf = float(confs[i]) if i < len(confs) else 0.0
+
+                            center_x = (x1 + x2) // 2
+                            center_y = (y1 + y2) // 2
+
+                            if center_x < self.division_line1_x:
+                                position = "IZQUIERDA"
+                            elif center_x < self.division_line2_x:
+                                position = "CENTRO"
+                            else:
+                                position = "DERECHA"
+
+                            obj_info = {
+                                "class": 0,
+                                "position": position,
+                                "confidence": conf,
+                                "track_id": None,
+                                "bbox": (int(x1), int(y1), int(x2), int(y2)),
+                                "center": (int(center_x), int(center_y)),
+                            }
+                            objects_detected.append(obj_info)
+
+                        except Exception as e:
+                            if self.verbose:
+                                print(f"[ERROR] Procesando detección NCNN {i}: {e}")
             else:
                 # YOLOv8 mode
                 results = self.model.track(
