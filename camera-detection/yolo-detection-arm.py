@@ -236,18 +236,36 @@ class NCNNYolo:
             
             # Inferencia
             ex = self.net.create_extractor()
-            ret = ex.input("images", mat_in)
+            
+            # Intentar con nombres comunes de input/output
+            input_names = ["images", "in0", "input"]
+            output_names = ["output", "out0", "output0"]
+            
+            ret = -1
+            for input_name in input_names:
+                ret = ex.input(input_name, mat_in)
+                if ret == 0:
+                    if self.verbose:
+                        print(f"[NCNN] ✓ Input layer encontrado: {input_name}")
+                    break
             
             if ret != 0:
                 if self.verbose:
-                    print("[NCNN] ⚠️ Error: input 'images' no encontrado")
+                    print("[NCNN] ⚠️ Error: no se encontró layer de input")
                 return Results(boxes=[], conf=[], cls=[], ids=None)
             
-            ret, mat_out = ex.extract("output")
+            # Intentar extraer output con nombres comunes
+            mat_out = None
+            for output_name in output_names:
+                ret, mat_out = ex.extract(output_name)
+                if ret == 0:
+                    if self.verbose:
+                        print(f"[NCNN] ✓ Output layer encontrado: {output_name}")
+                    break
             
-            if ret != 0:
+            if ret != 0 or mat_out is None:
                 if self.verbose:
-                    print("[NCNN] ⚠️ Error: output 'output' no encontrado")
+                    print("[NCNN] ⚠️ Error: no se encontró layer de output")
                 return Results(boxes=[], conf=[], cls=[], ids=None)
             
             # Parsear detecciones (formato: x, y, w, h, conf, class_probs...)
