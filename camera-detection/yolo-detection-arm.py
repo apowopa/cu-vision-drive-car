@@ -45,13 +45,27 @@ def get_cpu_temperature():
 
 def optimize_for_arm():
     """Configuraciones específicas para ARM/Raspberry Pi"""
-    cv2.setNumThreads(2)
+    # Detectar número de cores disponibles
+    import multiprocessing
+    num_cores = multiprocessing.cpu_count()
+    optimal_threads = max(1, num_cores - 1)
+    
+    cv2.setNumThreads(optimal_threads)
     if hasattr(cv2, "setUseOptimized"):
         cv2.setUseOptimized(True)
+    
+    # Desactivar CUDA si está disponible (más lento en CPU)
+    os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+    
+    # Optimizar PyTorch para CPU
+    torch.set_num_threads(optimal_threads)
+    torch.set_num_interop_threads(1)
 
     print("[INFO] Optimizaciones ARM aplicadas")
-    print("       - Threads CV2: 2")
+    print(f"       - Threads CV2: {optimal_threads}")
+    print(f"       - Threads PyTorch: {optimal_threads}")
     print("       - NEON Optimization: Enabled")
+    print("       - CUDA: Disabled")
 
 
 def convert_model_to_ncnn(model_path, imgsz=320, verbose=False):
@@ -281,18 +295,34 @@ class ObjectDetector:
         if self.verbose:
             print(f"[INFO] Cargando YOLOv8: {self.model_path}...")
 
+        # Cargar modelo
         self.model = YOLO(self.model_path)
-
+        
         device = "cuda" if torch.cuda.is_available() else "cpu"
         if self.verbose:
             print(f"[INFO] Device: {device}")
 
-        if device == "cuda" and half_precision:
-            if self.verbose:
-                print("[INFO] Usando FP16")
-            self.model.to(device).half()
+        # Configurar modelo con parámetros óptimos para ARM
+        if device == "cpu":
+            # En CPU, usar max_det bajo y verbose=False para más velocidad
+            self.model.overrides['max_det'] = 300  # Reducir detecciones
+            self.model.overrides['verbose'] = False
+            self.model.overrides['agnostic_nms'] = False
+            
+            if half_precision:
+                if self.verbose:
+                    print("[INFO] Usando FP16")
+                self.model.to(device).half()
+            else:
+                self.model.to(device)
         else:
-            self.model.to(device)
+            # GPU
+            if half_precision:
+                if self.verbose:
+                    print("[INFO] Usando FP16")
+                self.model.to(device).half()
+            else:
+                self.model.to(device)
 
         self.use_ncnn_mode = False
 
@@ -441,8 +471,19 @@ def main():
     ap.add_argument(
         "--use-ncnn", action="store_true", help="Usar NCNN si está disponible"
     )
+    ap.add_argument("--rpi5-fast", action="store_true", help="Preset optimizado para Raspberry Pi 5 (muy rápido)")
     ap.add_argument("--verbose", action="store_true", help="Modo verbose")
     args = ap.parse_args()
+    
+    # Aplicar preset Raspberry Pi 5 si se solicita
+    if args.rpi5_fast:
+        args.width = 320
+        args.height = 240
+        args.imgsz = 256
+        args.fps = 20
+        args.arm_optimize = True
+        args.use_ncnn = True
+        args.conf = 0.4
 
     try:
         detector = ObjectDetector(
