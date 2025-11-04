@@ -136,8 +136,8 @@ class NCNNYolo:
         self.conf_threshold = conf_threshold
         self.verbose = verbose
 
-    def detect(self, image):
-        """Detectar objetos en imagen usando NCNN"""
+    def track(self, image, classes=None, **kwargs):
+        """Detectar y trackear objetos (interfaz compatible con YOLOv8)"""
         try:
             h, w = image.shape[:2]
             scale = min(self.input_size / w, self.input_size / h)
@@ -167,25 +167,81 @@ class NCNNYolo:
             )
 
             ex = self.net.create_extractor()
-            ex.input("images", mat_in)
-            ret, mat_out = ex.extract("output")
-
+            
+            # Intentar con nombres estándar de NCNN
+            ret = ex.input("in0", mat_in)
             if ret != 0:
-                return []
+                ex.input("images", mat_in)
+            
+            ret, mat_out = ex.extract("out0")
+            if ret != 0:
+                ret, mat_out = ex.extract("output")
+            
+            if ret != 0:
+                if self.verbose:
+                    print("[WARNING] No se pudo extraer output de NCNN")
+                return Results(boxes=[], conf=[], cls=[], ids=None)
 
-            # Procesar detecciones (formato similar a YOLOv8)
+            # Procesar salida NCNN
+            # Formato esperado: [x_center, y_center, width, height, conf, class_probs...]
             detections = []
-            for i in range(mat_out.h if hasattr(mat_out, "h") else 0):
-                detection = mat_out.row(i) if hasattr(mat_out, "row") else None
-                if detection:
-                    detections.append(detection)
-
-            return detections
+            
+            if hasattr(mat_out, "w") and hasattr(mat_out, "h"):
+                for i in range(mat_out.h):
+                    row = []
+                    for j in range(mat_out.w):
+                        row.append(mat_out.channel(j)[i])
+                    if len(row) >= 5:
+                        x_c, y_c, w, h = row[0], row[1], row[2], row[3]
+                        conf = max(row[4:]) if len(row) > 4 else 0
+                        cls_id = row[4:].index(conf) if len(row) > 4 else 0
+                        
+                        # Filtrar por confianza
+                        if conf >= self.conf_threshold:
+                            # Convertir de coordenadas normalizadas
+                            x1 = (x_c - w/2) * w / scale
+                            y1 = (y_c - h/2) * h / scale
+                            x2 = (x_c + w/2) * w / scale
+                            y2 = (y_c + h/2) * h / scale
+                            
+                            detections.append({
+                                'box': [x1, y1, x2, y2],
+                                'conf': conf,
+                                'cls': cls_id
+                            })
+            
+            # Retornar formato compatible con YOLOv8
+            if detections:
+                boxes = []
+                confs = []
+                clss = []
+                for det in detections:
+                    boxes.append(det['box'])
+                    confs.append(det['conf'])
+                    clss.append(det['cls'])
+                
+                return Results(
+                    boxes=torch.tensor(boxes),
+                    conf=torch.tensor(confs),
+                    cls=torch.tensor(clss),
+                    ids=None
+                )
+            else:
+                return Results(boxes=[], conf=[], cls=[], ids=None)
 
         except Exception as e:
             if self.verbose:
-                print(f"[ERROR] Detección NCNN: {e}")
-            return []
+                print(f"[WARNING] Detección NCNN: {e}")
+            return Results(boxes=[], conf=[], cls=[], ids=None)
+
+
+class Results:
+    """Clase compatible con resultados de YOLO"""
+    def __init__(self, boxes, conf, cls, ids):
+        self.boxes = boxes if isinstance(boxes, torch.Tensor) else torch.tensor(boxes if boxes else [])
+        self.conf = conf if isinstance(conf, torch.Tensor) else torch.tensor(conf if conf else [])
+        self.cls = cls if isinstance(cls, torch.Tensor) else torch.tensor(cls if cls else [])
+        self.id = ids
 
 
 class ObjectDetector:
