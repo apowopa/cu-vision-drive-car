@@ -333,16 +333,12 @@ class ObjectDetector:
             )
 
             if param_path and bin_path:
-                self.model = NCNNYolo(
-                    param_path, bin_path, self.imgsz, self.conf_threshold, self.verbose
-                )
-                self.use_ncnn_mode = True
                 if self.verbose:
-                    print("[INFO] NCNN cargado correctamente")
-                return True
+                    print("[WARNING] NCNN inestable en esta versión, usando YOLOv8")
+                return False
         except Exception as e:
             if self.verbose:
-                print(f"[WARNING] NCNN falló: {e}")
+                print(f"[WARNING] NCNN no disponible: {e}")
 
         return False
 
@@ -405,127 +401,75 @@ class ObjectDetector:
 
         # Ejecutar tracking
         try:
-            if self.use_ncnn_mode:
-                # NCNN mode
-                results = self.model.track(
-                    frame,
-                    classes=[self.target_class],
-                    imgsz=self.imgsz,
-                )
-                r = results if isinstance(results, object) else results
-                objects_detected = []
-                detected = False
-                
-                if hasattr(r, 'boxes') and r.boxes is not None and len(r.boxes) > 0:
-                    detected = True
-                    
-                    boxes = r.boxes
-                    if hasattr(boxes, "cpu"):
-                        boxes = boxes.cpu().numpy()
-                    boxes = boxes.astype(int) if hasattr(boxes, 'astype') else boxes
+            # Solo YOLOv8 mode (NCNN deshabilitado por inestabilidad)
+            results = self.model.track(
+                frame,
+                conf=self.conf_threshold,
+                classes=[self.target_class],
+                imgsz=self.imgsz,
+                tracker=self.tracker,
+                persist=True,
+                verbose=False,
+            )
+            r = results[0] if isinstance(results, list) else results
 
-                    confs = r.conf
-                    if hasattr(confs, "cpu"):
-                        confs = confs.cpu().numpy()
+            objects_detected = []
+            detected = False
 
-                    for i, box in enumerate(boxes):
-                        try:
-                            x1, y1, x2, y2 = box[:4]
-                            conf = float(confs[i]) if i < len(confs) else 0.0
+            if r.boxes is not None and len(r.boxes) > 0:
+                detected = True
 
-                            center_x = (x1 + x2) // 2
-                            center_y = (y1 + y2) // 2
+                boxes = r.boxes.xyxy
+                if hasattr(boxes, "cpu"):
+                    boxes = boxes.cpu().numpy()
+                boxes = boxes.astype(int)
 
-                            if center_x < self.division_line1_x:
-                                position = "IZQUIERDA"
-                            elif center_x < self.division_line2_x:
-                                position = "CENTRO"
-                            else:
-                                position = "DERECHA"
+                confs = r.boxes.conf
+                if hasattr(confs, "cpu"):
+                    confs = confs.cpu().numpy()
 
-                            obj_info = {
-                                "class": 0,
-                                "position": position,
-                                "confidence": conf,
-                                "track_id": None,
-                                "bbox": (int(x1), int(y1), int(x2), int(y2)),
-                                "center": (int(center_x), int(center_y)),
-                            }
-                            objects_detected.append(obj_info)
+                has_track_ids = False
+                track_ids = None
+                if hasattr(r.boxes, "id") and r.boxes.id is not None:
+                    track_ids = r.boxes.id
+                    if hasattr(track_ids, "cpu"):
+                        track_ids = track_ids.cpu().numpy()
+                    if len(track_ids) > 0:
+                        track_ids = track_ids.astype(int)
+                        has_track_ids = True
 
-                        except Exception as e:
-                            if self.verbose:
-                                print(f"[ERROR] Procesando detección NCNN {i}: {e}")
-            else:
-                # YOLOv8 mode
-                results = self.model.track(
-                    frame,
-                    conf=self.conf_threshold,
-                    classes=[self.target_class],
-                    imgsz=self.imgsz,
-                    tracker=self.tracker,
-                    persist=True,
-                    verbose=False,
-                )
-                r = results[0] if isinstance(results, list) else results
+                for i, box in enumerate(boxes):
+                    try:
+                        x1, y1, x2, y2 = box
+                        conf = float(confs[i])
 
-                objects_detected = []
-                detected = False
+                        center_x = (x1 + x2) // 2
+                        center_y = (y1 + y2) // 2
 
-                if r.boxes is not None and len(r.boxes) > 0:
-                    detected = True
+                        if center_x < self.division_line1_x:
+                            position = "IZQUIERDA"
+                        elif center_x < self.division_line2_x:
+                            position = "CENTRO"
+                        else:
+                            position = "DERECHA"
 
-                    boxes = r.boxes.xyxy
-                    if hasattr(boxes, "cpu"):
-                        boxes = boxes.cpu().numpy()
-                    boxes = boxes.astype(int)
+                        track_id = None
+                        if has_track_ids and track_ids is not None:
+                            track_id = int(track_ids[i])
 
-                    confs = r.boxes.conf
-                    if hasattr(confs, "cpu"):
-                        confs = confs.cpu().numpy()
+                        obj_info = {
+                            "class": 0,
+                            "position": position,
+                            "confidence": conf,
+                            "track_id": track_id,
+                            "bbox": (int(x1), int(y1), int(x2), int(y2)),
+                            "center": (int(center_x), int(center_y)),
+                        }
+                        objects_detected.append(obj_info)
 
-                    has_track_ids = False
-                    track_ids = None
-                    if hasattr(r.boxes, "id") and r.boxes.id is not None:
-                        track_ids = r.boxes.id
-                        if hasattr(track_ids, "cpu"):
-                            track_ids = track_ids.cpu().numpy()
-                        if len(track_ids) > 0:
-                            track_ids = track_ids.astype(int)
-                            has_track_ids = True
-
-                    for i, box in enumerate(boxes):
-                        try:
-                            x1, y1, x2, y2 = box
-                            conf = float(confs[i])
-
-                            center_x = (x1 + x2) // 2
-                            center_y = (y1 + y2) // 2
-
-                            if center_x < self.division_line1_x:
-                                position = "IZQUIERDA"
-                            elif center_x < self.division_line2_x:
-                                position = "CENTRO"
-                            else:
-                                position = "DERECHA"
-
-                            track_id = None
-                            if has_track_ids and track_ids is not None:
-                                track_id = int(track_ids[i])
-
-                            obj_info = {
-                                "class": 0,
-                                "position": position,
-                                "confidence": conf,
-                                "track_id": track_id,
-                                "bbox": (int(x1), int(y1), int(x2), int(y2)),
-                                "center": (int(center_x), int(center_y)),
-                            }
-                            objects_detected.append(obj_info)
-
-                        except Exception as e:
-                            if self.verbose:
-                                print(f"[ERROR] Procesando detección {i}: {e}")
+                    except Exception as e:
+                        if self.verbose:
+                            print(f"[ERROR] Procesando detección {i}: {e}")
 
         except Exception as e:
             if self.verbose:
