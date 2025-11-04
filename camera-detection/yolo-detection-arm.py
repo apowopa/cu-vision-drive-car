@@ -5,6 +5,10 @@ Detector de objetos YOLOv8 con soporte para NCNN en ARM/Raspberry Pi
 Soporta tanto YOLOv8 nativo como conversión automática a NCNN
 """
 
+import os
+# Desabilitar GUI de OpenCV antes de importar cv2
+os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+
 import argparse
 import cv2
 import sys
@@ -12,7 +16,6 @@ import time
 import torch
 from ultralytics import YOLO
 from pathlib import Path
-import os
 
 # ARM/Raspberry Pi specific imports
 try:
