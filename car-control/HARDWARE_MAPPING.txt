@@ -1,0 +1,53 @@
+# MAPEO DE HARDWARE
+
+## GPIO PINS - MOTORES
+```
+Motor Izquierdo:
+  GPIO 5  → Motor Left A
+  GPIO 6  → Motor Left B
+
+Motor Derecho:
+  GPIO 13 → Motor Right A
+  GPIO 19 → Motor Right B
+```
+
+## GPIO PINS - SENSORES VL53L0X (XSHUT)
+```
+GPIO 4  → Sensor Frontal XSHUT
+GPIO 17 → Sensor Derecho XSHUT
+GPIO 27 → Sensor Izquierdo XSHUT
+```
+
+## DIRECCIONES I2C - SENSORES VL53L0X
+```
+0x29 → Dirección por defecto (antes de asignar)
+0x30 → Sensor Izquierdo (asignado)
+0x31 → Sensor Frontal (asignado)
+0x32 → Sensor Derecho (asignado)
+```
+
+## TABLA COMPLETA
+| Sensor | GPIO XSHUT | Dirección I2C |
+|--------|-----------|---------------|
+| Frontal | 4 | 0x31 |
+| Derecho | 17 | 0x32 |
+| Izquierdo | 27 | 0x30 |
+
+## CÓDIGO DE INICIALIZACIÓN
+```python
+# Pines de control (apagado/encendido)
+xshut_pins = {
+    'frontal': 4,
+    'derecha': 17,
+    'izquierda': 27
+}
+
+# Direcciones I2C únicas para cada sensor
+new_addresses = {
+    'izquierda': 0x30,
+    'frontal': 0x31,
+    'derecha': 0x32
+}
+```
+
+Ver `tracker_controller_advanced.py` para implementación completa.
