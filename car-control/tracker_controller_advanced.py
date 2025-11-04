@@ -17,23 +17,22 @@ import time
 import sys
 import argparse
 from pathlib import Path
-import os
+import importlib.util
 
 # Importar el tracker y controlador
 script_dir = Path(__file__).parent
 project_root = script_dir.parent
-camera_detection_dir = project_root / "camera-detection"
 
-# Agregar al path
-if str(script_dir) not in sys.path:
-    sys.path.insert(0, str(script_dir))
-
-try:
-    from tracker_controller import TrackerController
-except ModuleNotFoundError:
-    # Fallback si está en ruta diferente
-    sys.path.insert(0, os.path.dirname(__file__))
-    from tracker_controller import TrackerController
+# Cargar tracker_controller.py
+tracker_controller_path = script_dir / "tracker_controller.py"
+spec_tc = importlib.util.spec_from_file_location("tracker_controller", tracker_controller_path)
+if spec_tc and spec_tc.loader:
+    tracker_module = importlib.util.module_from_spec(spec_tc)
+    sys.modules["tracker_controller"] = tracker_module
+    spec_tc.loader.exec_module(tracker_module)
+    TrackerController = tracker_module.TrackerController
+else:
+    raise RuntimeError(f"No se puede cargar: {tracker_controller_path}")
 
 # Importar sensores
 try:

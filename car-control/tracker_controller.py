@@ -17,23 +17,23 @@ import time
 import sys
 import argparse
 from pathlib import Path
-import os
+import importlib.util
 
 # Importar el tracker
 script_dir = Path(__file__).parent
 project_root = script_dir.parent
 camera_detection_dir = project_root / "camera-detection"
 
-# Agregar al path
-if str(camera_detection_dir) not in sys.path:
-    sys.path.insert(0, str(camera_detection_dir))
-
-try:
-    from yolo_detection_arm import ObjectDetector
-except ModuleNotFoundError:
-    # Fallback si está en ruta diferente
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'camera-detection'))
-    from yolo_detection_arm import ObjectDetector
+# Cargar el módulo con guión en el nombre
+module_path = camera_detection_dir / "yolo-detection-arm.py"
+spec = importlib.util.spec_from_file_location("yolo_detection_arm", module_path)
+if spec and spec.loader:
+    yolo_module = importlib.util.module_from_spec(spec)
+    sys.modules["yolo_detection_arm"] = yolo_module
+    spec.loader.exec_module(yolo_module)
+    ObjectDetector = yolo_module.ObjectDetector
+else:
+    raise RuntimeError(f"No se puede cargar el módulo: {module_path}")
 
 # Importar gpiozero para control de motores
 try:
