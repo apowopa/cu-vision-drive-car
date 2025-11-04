@@ -216,6 +216,10 @@ class NCNNYolo:
         self.conf_threshold = conf_threshold
         self.verbose = verbose
         self.track_id_counter = 0
+        
+        # Cache layer names para evitar búsqueda repetida
+        self.input_layer_name = None
+        self.output_layer_name = None
 
     def track(self, image, classes=None, **kwargs):
         """Detectar y trackear objetos (interfaz compatible con YOLOv8)"""
@@ -234,39 +238,58 @@ class NCNNYolo:
             # Normalizar a [0, 1]
             mat_in.substract_mean_normalize([0, 0, 0], [1/255.0, 1/255.0, 1/255.0])
             
-            # Inferencia
-            ex = self.net.create_extractor()
+            # Inferencia - suprimir warnings de NCNN
+            import contextlib
+            import io
             
-            # Intentar con nombres comunes de input/output
-            input_names = ["images", "in0", "input"]
-            output_names = ["output", "out0", "output0"]
-            
-            ret = -1
-            for input_name in input_names:
-                ret = ex.input(input_name, mat_in)
-                if ret == 0:
-                    if self.verbose:
-                        print(f"[NCNN] ✓ Input layer encontrado: {input_name}")
-                    break
-            
-            if ret != 0:
-                if self.verbose:
-                    print("[NCNN] ⚠️ Error: no se encontró layer de input")
-                return Results(boxes=[], conf=[], cls=[], ids=None)
-            
-            # Intentar extraer output con nombres comunes
-            mat_out = None
-            for output_name in output_names:
-                ret, mat_out = ex.extract(output_name)
-                if ret == 0:
-                    if self.verbose:
-                        print(f"[NCNN] ✓ Output layer encontrado: {output_name}")
-                    break
-            
-            if ret != 0 or mat_out is None:
-                if self.verbose:
-                    print("[NCNN] ⚠️ Error: no se encontró layer de output")
-                return Results(boxes=[], conf=[], cls=[], ids=None)
+            # Silenciar stderr de NCNN
+            f_err = io.StringIO()
+            with contextlib.redirect_stderr(f_err):
+                ex = self.net.create_extractor()
+                
+                # Intentar con nombres comunes de input/output
+                # Usar cache si ya se encontraron los layer names
+                if self.input_layer_name is None or self.output_layer_name is None:
+                    input_names = ["images", "in0", "input"]
+                    output_names = ["output", "out0", "output0"]
+                    
+                    ret = -1
+                    for input_name in input_names:
+                        ret = ex.input(input_name, mat_in)
+                        if ret == 0:
+                            self.input_layer_name = input_name
+                            if self.verbose:
+                                print(f"[NCNN] ✓ Input layer encontrado: {input_name}")
+                            break
+                    
+                    if ret != 0:
+                        if self.verbose:
+                            print("[NCNN] ⚠️ Error: no se encontró layer de input")
+                        return Results(boxes=[], conf=[], cls=[], ids=None)
+                    
+                    # Intentar extraer output con nombres comunes
+                    mat_out = None
+                    for output_name in output_names:
+                        ret, mat_out = ex.extract(output_name)
+                        if ret == 0:
+                            self.output_layer_name = output_name
+                            if self.verbose:
+                                print(f"[NCNN] ✓ Output layer encontrado: {output_name}")
+                            break
+                    
+                    if ret != 0 or mat_out is None:
+                        if self.verbose:
+                            print("[NCNN] ⚠️ Error: no se encontró layer de output")
+                        return Results(boxes=[], conf=[], cls=[], ids=None)
+                else:
+                    # Usar layer names cacheados
+                    ret = ex.input(self.input_layer_name, mat_in)
+                    if ret != 0:
+                        return Results(boxes=[], conf=[], cls=[], ids=None)
+                    
+                    ret, mat_out = ex.extract(self.output_layer_name)
+                    if ret != 0 or mat_out is None:
+                        return Results(boxes=[], conf=[], cls=[], ids=None)
             
             # Parsear detecciones (formato: x, y, w, h, conf, class_probs...)
             detections = []
