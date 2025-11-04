@@ -6,12 +6,17 @@ Soporta tanto YOLOv8 nativo como conversión automática a NCNN
 """
 
 import os
-# Desabilitar GUI de OpenCV antes de importar cv2
+import sys
+
+# Desabilitar GUI COMPLETAMENTE antes de cualquier import de cv2
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+os.environ['QT_QPA_FONTDIR'] = '/usr/share/fonts'
+os.environ['SDL_VIDEODRIVER'] = 'dummy'
+os.environ['DISPLAY'] = ''
+os.environ['MPLBACKEND'] = 'Agg'
 
 import argparse
 import cv2
-import sys
 import time
 import torch
 import numpy as np
@@ -632,14 +637,25 @@ def main():
             skip_frames=args.skip_frames,
         )
 
+        # Intentar crear ventana solo si hay display disponible
         win = "YOLOv8 Detector - ARM"
-        cv2.namedWindow(win)
+        has_display = False
+        try:
+            cv2.namedWindow(win)
+            has_display = True
+        except Exception as e:
+            if detector.verbose:
+                print(f"[INFO] No display available (headless mode): {e}")
 
         while True:
             result = detector.get_detection()
 
             if result["frame"] is None:
                 break
+
+            # Solo procesar visualización si hay display
+            if not has_display:
+                continue
 
             vis_frame = result["frame"].copy()
 
@@ -745,15 +761,17 @@ def main():
                 2,
             )
 
-            cv2.imshow(win, vis_frame)
+            if has_display:
+                cv2.imshow(win, vis_frame)
 
-            key = cv2.waitKey(1) & 0xFF
-            if key == 27 or key == ord("q"):
-                print("[INFO] Saliendo...")
-                break
+                key = cv2.waitKey(1) & 0xFF
+                if key == 27 or key == ord("q"):
+                    print("[INFO] Saliendo...")
+                    break
 
         detector.close()
-        cv2.destroyAllWindows()
+        if has_display:
+            cv2.destroyAllWindows()
 
     except Exception as e:
         print(f"[ERROR] {e}")
